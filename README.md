@@ -1,9 +1,9 @@
-Informatipon about both scripts:
+Information about both scripts:
 
-These script combining commands and tools already preinstalled into the system.
+These script combining commands and tools already preinstalled into the system for easier and faster usage.
 
 
-fedoracalenUP is simple version providinf following options:
+fedoracalenUP is simple version providing following options:
 
 1 - DNF package cache
 2 - Unused dependencies
@@ -15,6 +15,8 @@ fedoracalenUP is simple version providinf following options:
 8 - User application caches
 
 9 - CLEAN ALL
+
+0 - EXIT
 
 fedoramaintenance provides more functionalities: 
 
@@ -26,7 +28,9 @@ fedoramaintenance provides more functionalities:
 6 - systemd journal logs older than 3 days
 7 - Temporary files
 8 - User application caches
+
 9 - CLEAN ALL
+
 10 - Disk usage analyzer
 11 - Find 20 largest files
 12 - Flatpak maintenance
@@ -38,11 +42,15 @@ fedoramaintenance provides more functionalities:
 18 - Btrfs usage / health
 19 - System information
 
+0 - EXIT
 
 INSTALLATION INSTRUCTIONS
 
-sudo install -m 755 ~/Documents/fedoracleanUP /usr/local/bin/fedoracleanUP
-sudo install -m 755 ~/Documents/fedoramaintenance /usr/local/bin/fedoramaintenance
+sudo install -m 755 ~/File_Location_Folder/fedoracleanUP /usr/local/bin/fedoracleanUP
+sudo install -m 755 ~/File_Location_Folder/fedoramaintenance /usr/local/bin/fedoramaintenance
+
+~/File_Location_Folder/ - Replace with actual file location, for example:
+/home/user/Downloads/fedoracelanUP
 
 USAGE:
 
