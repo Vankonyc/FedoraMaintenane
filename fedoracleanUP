@@ -1,0 +1,858 @@
+#!/usr/bin/env bash
+
+# ============================================================
+#              FEDORA SYSTEM CLEANUP v2.1
+#                    Script by Vanko
+# ============================================================
+
+# ------------------------------------------------------------
+# ROOT CHECK
+# ------------------------------------------------------------
+
+if [[ $EUID -ne 0 ]]; then
+    echo
+    echo "ERROR: This utility must be run as root."
+    echo
+    echo "Run it with:"
+    echo "  sudo fedoracleanUP"
+    echo
+    exit 1
+fi
+
+
+# ------------------------------------------------------------
+# STATUS VARIABLES
+# ------------------------------------------------------------
+
+declare -A STATUS
+declare -A FREED
+
+for i in {1..8}; do
+    STATUS[$i]="NOT CLEANED"
+    FREED[$i]=0
+done
+
+SESSION_CLEANED=0
+
+
+# ------------------------------------------------------------
+# HELPER FUNCTIONS
+# ------------------------------------------------------------
+
+separator() {
+    echo
+    echo "============================================================"
+    echo
+}
+
+
+pause_menu() {
+    echo
+    read -rp "Press ENTER to return to the menu..."
+}
+
+
+confirm() {
+    echo
+    read -rp "Continue? [y/N]: " answer
+
+    case "$answer" in
+        y|Y|yes|YES|Yes)
+            return 0
+            ;;
+        *)
+            echo
+            echo "Operation cancelled."
+            return 1
+            ;;
+    esac
+}
+
+
+human_size() {
+    local bytes="${1:-0}"
+
+    if ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        bytes=0
+    fi
+
+    numfmt --to=iec-i --suffix=B "$bytes" 2>/dev/null ||
+        echo "$bytes bytes"
+}
+
+
+get_free_space() {
+    df -B1 --output=avail / 2>/dev/null |
+        tail -n 1 |
+        tr -d ' '
+}
+
+
+measure_start() {
+    get_free_space
+}
+
+
+measure_end() {
+    local before="$1"
+    local after
+    local difference
+
+    sync
+
+    after=$(get_free_space)
+
+    if [[ "$before" =~ ^[0-9]+$ ]] &&
+       [[ "$after" =~ ^[0-9]+$ ]]; then
+
+        difference=$((after - before))
+
+        if (( difference < 0 )); then
+            difference=0
+        fi
+
+        echo "$difference"
+    else
+        echo 0
+    fi
+}
+
+
+mark_cleaned() {
+    local number="$1"
+    local before="$2"
+
+    STATUS[$number]="CLEANED"
+    FREED[$number]=$(measure_end "$before")
+    SESSION_CLEANED=1
+}
+
+
+# ============================================================
+# 1 - DNF PACKAGE CACHE
+# ============================================================
+
+clean_dnf_packages() {
+
+    separator
+
+    echo "1 - DNF PACKAGE CACHE"
+    echo
+    echo "This removes downloaded RPM package files stored"
+    echo "in the DNF package cache."
+    echo
+    echo "Installed applications and packages are NOT removed."
+
+    confirm || return
+
+    local before
+    before=$(measure_start)
+
+    echo
+    echo "Cleaning DNF package cache..."
+    echo
+
+    if dnf clean packages; then
+        mark_cleaned 1 "$before"
+
+        echo
+        echo "SUCCESS: DNF package cache cleaned."
+        echo "Approx. recovered: $(human_size "${FREED[1]}")"
+    else
+        STATUS[1]="ERROR"
+
+        echo
+        echo "ERROR: DNF package cleanup failed."
+    fi
+}
+
+
+# ============================================================
+# 2 - UNUSED DEPENDENCIES
+# ============================================================
+
+clean_unused() {
+
+    separator
+
+    echo "2 - UNUSED DEPENDENCIES"
+    echo
+    echo "DNF will search for packages that were installed"
+    echo "as dependencies but are no longer required."
+    echo
+    echo "DNF will show what it intends to remove."
+
+    confirm || return
+
+    local before
+    before=$(measure_start)
+
+    echo
+
+    if dnf autoremove; then
+        mark_cleaned 2 "$before"
+
+        echo
+        echo "SUCCESS: Unused dependency cleanup completed."
+        echo "Approx. recovered: $(human_size "${FREED[2]}")"
+    else
+        STATUS[2]="ERROR"
+
+        echo
+        echo "ERROR: DNF autoremove reported a problem."
+    fi
+}
+
+
+# ============================================================
+# 3 - DNF REPOSITORY METADATA / CACHE
+# ============================================================
+
+clean_dnf_metadata() {
+
+    separator
+
+    echo "3 - DNF REPOSITORY METADATA / CACHE"
+    echo
+    echo "This completely clears cached DNF repository"
+    echo "metadata and cached repository information."
+    echo
+    echo "DNF will download fresh metadata when required."
+
+    confirm || return
+
+    local before
+    before=$(measure_start)
+
+    echo
+    echo "Cleaning DNF metadata and cache..."
+    echo
+
+    if dnf clean all; then
+
+        rm -rf -- /var/cache/dnf/* 2>/dev/null || true
+
+        mark_cleaned 3 "$before"
+
+        echo
+        echo "SUCCESS: DNF metadata/cache cleaned."
+        echo "Approx. recovered: $(human_size "${FREED[3]}")"
+
+    else
+
+        STATUS[3]="ERROR"
+
+        echo
+        echo "ERROR: DNF metadata cleanup failed."
+
+    fi
+}
+
+
+# ============================================================
+# 4 - CRASH REPORTS / COREDUMPS
+# ============================================================
+
+clean_crashes() {
+
+    separator
+
+    echo "4 - CRASH REPORTS AND COREDUMPS"
+    echo
+    echo "This removes stored crash reports and systemd"
+    echo "coredumps."
+    echo
+    echo "These files are normally useful only for debugging."
+
+    confirm || return
+
+    local before
+    before=$(measure_start)
+
+    echo
+
+    if command -v coredumpctl >/dev/null 2>&1; then
+        echo "Cleaning systemd coredumps..."
+        coredumpctl purge 2>/dev/null || true
+    else
+        echo "coredumpctl not installed - skipping coredumps."
+    fi
+
+    if [[ -d /var/spool/abrt ]]; then
+        echo "Cleaning ABRT crash reports..."
+        rm -rf -- /var/spool/abrt/* 2>/dev/null || true
+    else
+        echo "ABRT directory not present - skipping."
+    fi
+
+    mark_cleaned 4 "$before"
+
+    echo
+    echo "SUCCESS: Crash cleanup completed."
+    echo "Approx. recovered: $(human_size "${FREED[4]}")"
+}
+
+
+# ============================================================
+# 5 - ROTATED / COMPRESSED LOGS
+# ============================================================
+
+clean_logs() {
+
+    separator
+
+    echo "5 - ROTATED / COMPRESSED LOGS"
+    echo
+    echo "This removes old rotated and compressed log files"
+    echo "from /var/log."
+    echo
+    echo "Current active log files are NOT truncated."
+
+    confirm || return
+
+    local before
+    before=$(measure_start)
+
+    echo
+    echo "Removing old log files..."
+
+    find /var/log -xdev -type f \
+        \( \
+            -name "*.gz" \
+            -o -name "*.old" \
+            -o -name "*.log.*" \
+            -o -regex '.*\.[0-9]+$' \
+        \) \
+        -delete 2>/dev/null || true
+
+    mark_cleaned 5 "$before"
+
+    echo
+    echo "SUCCESS: Rotated/compressed logs cleaned."
+    echo "Approx. recovered: $(human_size "${FREED[5]}")"
+}
+
+
+# ============================================================
+# 6 - SYSTEMD JOURNAL
+# ============================================================
+
+clean_journal() {
+
+    separator
+
+    echo "6 - SYSTEMD JOURNAL"
+    echo
+    echo "This removes systemd journal entries older"
+    echo "than 3 days."
+    echo
+    echo "The most recent 3 days are retained."
+
+    confirm || return
+
+    local before
+    before=$(measure_start)
+
+    echo
+    echo "Rotating journal..."
+    journalctl --rotate
+
+    echo
+    echo "Removing journal data older than 3 days..."
+    journalctl --vacuum-time=3d
+
+    mark_cleaned 6 "$before"
+
+    echo
+    echo "SUCCESS: Journal cleanup completed."
+    echo "Approx. recovered: $(human_size "${FREED[6]}")"
+}
+
+
+# ============================================================
+# 7 - TEMPORARY FILES
+# ============================================================
+
+clean_temp() {
+
+    separator
+
+    echo "7 - TEMPORARY FILES"
+    echo
+    echo "This will:"
+    echo
+    echo "  * Run systemd temporary-file cleanup"
+    echo "  * Remove /tmp files older than 3 days"
+    echo "  * Remove /var/tmp files older than 7 days"
+
+    confirm || return
+
+    local before
+    before=$(measure_start)
+
+    echo
+    echo "Running systemd temporary-file cleanup..."
+    systemd-tmpfiles --clean
+
+    echo
+    echo "Cleaning /tmp..."
+    find /tmp -xdev -mindepth 1 -mtime +3 \
+        -delete 2>/dev/null || true
+
+    echo "Cleaning /var/tmp..."
+    find /var/tmp -xdev -mindepth 1 -mtime +7 \
+        -delete 2>/dev/null || true
+
+    mark_cleaned 7 "$before"
+
+    echo
+    echo "SUCCESS: Temporary-file cleanup completed."
+    echo "Approx. recovered: $(human_size "${FREED[7]}")"
+}
+
+
+# ============================================================
+# 8 - USER APPLICATION CACHES
+# ============================================================
+
+clean_user_cache() {
+
+    separator
+
+    echo "8 - USER APPLICATION CACHES"
+    echo
+    echo "WARNING:"
+    echo
+    echo "This clears the contents of ~/.cache for users"
+    echo "under /home."
+    echo
+    echo "This can include caches created by:"
+    echo
+    echo "  * KDE"
+    echo "  * Browsers"
+    echo "  * Steam / game launchers"
+    echo "  * Thumbnail generators"
+    echo "  * Other desktop applications"
+    echo
+    echo "Applications will recreate required cache files."
+    echo "The first launch afterwards may be slower."
+
+    confirm || return
+
+    local before
+    before=$(measure_start)
+
+    echo
+
+    for home in /home/*; do
+
+        [[ -d "$home/.cache" ]] || continue
+
+        echo "Cleaning: $home/.cache"
+
+        find "$home/.cache" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} + \
+            2>/dev/null || true
+
+    done
+
+    if [[ -d /root/.cache ]]; then
+
+        echo "Cleaning: /root/.cache"
+
+        find /root/.cache \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} + \
+            2>/dev/null || true
+
+    fi
+
+    mark_cleaned 8 "$before"
+
+    echo
+    echo "SUCCESS: Application caches cleaned."
+    echo "Approx. recovered: $(human_size "${FREED[8]}")"
+}
+
+
+# ============================================================
+# 9 - CLEAN ALL
+# ============================================================
+
+clean_all() {
+
+    separator
+
+    echo "9 - CLEAN ALL"
+    echo
+    echo "The following operations will run:"
+    echo
+    echo "  1 - DNF package cache"
+    echo "  2 - Unused dependencies"
+    echo "  3 - DNF repository metadata/cache"
+    echo "  4 - Crash reports and old coredumps"
+    echo "  5 - Rotated/compressed logs"
+    echo "  6 - systemd journal older than 3 days"
+    echo "  7 - Temporary files"
+    echo "  8 - User application caches"
+    echo
+    echo "Personal documents are NOT targeted."
+
+    confirm || return
+
+    local before
+
+    separator
+    echo "[1/8] Cleaning DNF package cache..."
+
+    before=$(measure_start)
+
+    if dnf clean packages; then
+        mark_cleaned 1 "$before"
+    else
+        STATUS[1]="ERROR"
+    fi
+
+
+    separator
+    echo "[2/8] Removing unused dependencies..."
+
+    before=$(measure_start)
+
+    if dnf autoremove -y; then
+        mark_cleaned 2 "$before"
+    else
+        STATUS[2]="ERROR"
+    fi
+
+
+    separator
+    echo "[3/8] Cleaning DNF repository metadata/cache..."
+
+    before=$(measure_start)
+
+    if dnf clean all; then
+        rm -rf -- /var/cache/dnf/* 2>/dev/null || true
+        mark_cleaned 3 "$before"
+    else
+        STATUS[3]="ERROR"
+    fi
+
+
+    separator
+    echo "[4/8] Cleaning crash reports/coredumps..."
+
+    before=$(measure_start)
+
+    if command -v coredumpctl >/dev/null 2>&1; then
+        coredumpctl purge 2>/dev/null || true
+    fi
+
+    if [[ -d /var/spool/abrt ]]; then
+        rm -rf -- /var/spool/abrt/* 2>/dev/null || true
+    fi
+
+    mark_cleaned 4 "$before"
+
+
+    separator
+    echo "[5/8] Cleaning rotated/compressed logs..."
+
+    before=$(measure_start)
+
+    find /var/log -xdev -type f \
+        \( \
+            -name "*.gz" \
+            -o -name "*.old" \
+            -o -name "*.log.*" \
+            -o -regex '.*\.[0-9]+$' \
+        \) \
+        -delete 2>/dev/null || true
+
+    mark_cleaned 5 "$before"
+
+
+    separator
+    echo "[6/8] Cleaning systemd journal..."
+
+    before=$(measure_start)
+
+    journalctl --rotate
+    journalctl --vacuum-time=3d
+
+    mark_cleaned 6 "$before"
+
+
+    separator
+    echo "[7/8] Cleaning temporary files..."
+
+    before=$(measure_start)
+
+    systemd-tmpfiles --clean
+
+    find /tmp -xdev -mindepth 1 -mtime +3 \
+        -delete 2>/dev/null || true
+
+    find /var/tmp -xdev -mindepth 1 -mtime +7 \
+        -delete 2>/dev/null || true
+
+    mark_cleaned 7 "$before"
+
+
+    separator
+    echo "[8/8] Cleaning application caches..."
+
+    before=$(measure_start)
+
+    for home in /home/*; do
+
+        [[ -d "$home/.cache" ]] || continue
+
+        echo "Cleaning: $home/.cache"
+
+        find "$home/.cache" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} + \
+            2>/dev/null || true
+
+    done
+
+    if [[ -d /root/.cache ]]; then
+
+        find /root/.cache \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} + \
+            2>/dev/null || true
+
+    fi
+
+    mark_cleaned 8 "$before"
+
+
+    separator
+
+    echo "FULL CLEANUP COMPLETED"
+}
+
+
+# ============================================================
+# FINAL SUMMARY
+# ============================================================
+
+show_summary() {
+
+    separator
+
+    local total=0
+
+    for i in {1..8}; do
+        total=$((total + FREED[$i]))
+    done
+
+    echo "                    CLEANUP SUMMARY"
+    echo "                    Script by Vanko"
+    echo
+    echo "------------------------------------------------------------"
+
+    printf "%-34s %-13s %12s\n" \
+        "DNF package cache" \
+        "${STATUS[1]}" \
+        "$(human_size "${FREED[1]}")"
+
+    printf "%-34s %-13s %12s\n" \
+        "Unused dependencies" \
+        "${STATUS[2]}" \
+        "$(human_size "${FREED[2]}")"
+
+    printf "%-34s %-13s %12s\n" \
+        "DNF metadata/cache" \
+        "${STATUS[3]}" \
+        "$(human_size "${FREED[3]}")"
+
+    printf "%-34s %-13s %12s\n" \
+        "Crash reports/coredumps" \
+        "${STATUS[4]}" \
+        "$(human_size "${FREED[4]}")"
+
+    printf "%-34s %-13s %12s\n" \
+        "Rotated/compressed logs" \
+        "${STATUS[5]}" \
+        "$(human_size "${FREED[5]}")"
+
+    printf "%-34s %-13s %12s\n" \
+        "systemd journal" \
+        "${STATUS[6]}" \
+        "$(human_size "${FREED[6]}")"
+
+    printf "%-34s %-13s %12s\n" \
+        "Temporary files" \
+        "${STATUS[7]}" \
+        "$(human_size "${FREED[7]}")"
+
+    printf "%-34s %-13s %12s\n" \
+        "Application caches" \
+        "${STATUS[8]}" \
+        "$(human_size "${FREED[8]}")"
+
+    echo
+    echo "------------------------------------------------------------"
+    echo "Approx. total recovered: $(human_size "$total")"
+    echo "------------------------------------------------------------"
+    echo
+    echo "NOTE:"
+    echo "Space figures are approximate."
+    echo
+    echo "Btrfs, snapshots, open files and background filesystem"
+    echo "activity can affect the reported amount."
+    echo
+    echo "============================================================"
+    echo "              Fedora System Cleanup"
+    echo "                  Script by Vanko"
+    echo "============================================================"
+}
+
+
+# ============================================================
+# WELCOME
+# ============================================================
+
+echo
+echo "============================================================"
+echo "              FEDORA SYSTEM CLEANUP v2.1"
+echo "============================================================"
+echo
+echo "                    Script by Vanko"
+echo
+echo "Welcome to Fedora System Cleanup."
+echo
+echo "This utility can remove unnecessary package caches,"
+echo "crash reports, old logs, temporary files and application"
+echo "caches."
+echo
+echo "You can clean individual categories or choose option 9"
+echo "to perform all cleanup operations."
+echo
+echo "A final summary shows what was cleaned and approximately"
+echo "how much disk space was recovered."
+echo
+echo "Personal documents are NOT targeted by this utility."
+echo
+echo "============================================================"
+echo
+
+read -rp "Press ENTER to continue..."
+
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+
+while true; do
+
+    echo
+    echo
+    echo "============================================================"
+    echo "              FEDORA SYSTEM CLEANUP v2.1"
+    echo "                    Script by Vanko"
+    echo "============================================================"
+    echo
+    echo "Choose what you want to clean:"
+    echo
+    echo "  1 - DNF package cache"
+    echo "  2 - Unused dependencies"
+    echo "  3 - DNF repository metadata/cache"
+    echo "  4 - Crash reports and old coredumps"
+    echo "  5 - Rotated/compressed logs"
+    echo "  6 - systemd journal logs older than 3 days"
+    echo "  7 - Temporary files"
+    echo "  8 - User application caches"
+    echo
+    echo "  9 - CLEAN ALL"
+    echo
+    echo "  0 - Finish / Exit"
+    echo
+    echo "============================================================"
+    echo
+
+    read -rp "Enter your choice [0-9]: " choice
+
+    case "$choice" in
+
+        1)
+            clean_dnf_packages
+            pause_menu
+            ;;
+
+        2)
+            clean_unused
+            pause_menu
+            ;;
+
+        3)
+            clean_dnf_metadata
+            pause_menu
+            ;;
+
+        4)
+            clean_crashes
+            pause_menu
+            ;;
+
+        5)
+            clean_logs
+            pause_menu
+            ;;
+
+        6)
+            clean_journal
+            pause_menu
+            ;;
+
+        7)
+            clean_temp
+            pause_menu
+            ;;
+
+        8)
+            clean_user_cache
+            pause_menu
+            ;;
+
+        9)
+            clean_all
+            pause_menu
+            ;;
+
+        0)
+
+            if (( SESSION_CLEANED == 1 )); then
+                show_summary
+            else
+                separator
+
+                echo "Fedora System Cleanup"
+                echo "Script by Vanko"
+                echo
+                echo "No cleanup operations were performed."
+                echo "Nothing was changed."
+            fi
+
+            echo
+            read -rp "Press ENTER to exit..."
+            exit 0
+            ;;
+
+        *)
+            echo
+            echo "Invalid selection."
+            echo "Please enter a number from 0 to 9."
+            ;;
+
+    esac
+
+done

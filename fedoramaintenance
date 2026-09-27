@@ -1,0 +1,1187 @@
+#!/usr/bin/env bash
+
+# ============================================================
+#           FEDORA MAINTENANCE UTILITY v2.1
+#                    Script by Vanko
+# ============================================================
+
+# ------------------------------------------------------------
+# ROOT CHECK
+# ------------------------------------------------------------
+
+if [[ $EUID -ne 0 ]]; then
+    echo
+    echo "ERROR: This utility must be run as root."
+    echo
+    echo "Run:"
+    echo "  sudo fedoramaintenance"
+    echo
+    exit 1
+fi
+
+
+# ------------------------------------------------------------
+# COLORS
+# ------------------------------------------------------------
+
+if [[ -t 1 ]]; then
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    RED='\033[0;31m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    RESET='\033[0m'
+else
+    GREEN=''
+    YELLOW=''
+    RED=''
+    CYAN=''
+    BOLD=''
+    RESET=''
+fi
+
+
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
+
+header() {
+
+    echo
+    echo
+    echo "============================================================"
+    echo "           FEDORA MAINTENANCE UTILITY v2.1"
+    echo "                    Script by Vanko"
+    echo "============================================================"
+}
+
+
+pause_menu() {
+    echo
+    read -rp "Press ENTER to return to the menu..."
+}
+
+
+confirm() {
+
+    echo
+    read -rp "Continue? [y/N]: " answer
+
+    case "$answer" in
+        y|Y|yes|YES|Yes)
+            return 0
+            ;;
+        *)
+            echo
+            echo "Operation cancelled."
+            return 1
+            ;;
+    esac
+}
+
+
+human() {
+
+    local bytes="${1:-0}"
+
+    numfmt --to=iec-i --suffix=B "$bytes" 2>/dev/null ||
+        echo "$bytes bytes"
+}
+
+
+directory_size() {
+
+    local directory="$1"
+
+    if [[ -e "$directory" ]]; then
+        du -shx "$directory" 2>/dev/null |
+            awk '{print $1}'
+    else
+        echo "N/A"
+    fi
+}
+
+
+# ============================================================
+# 1 - DNF PACKAGE CACHE
+# ============================================================
+
+dnf_packages() {
+
+    header
+
+    echo
+    echo -e "${BOLD}1 - DNF PACKAGE CACHE${RESET}"
+    echo
+    echo "Current cache size:"
+    echo "  $(directory_size /var/cache/dnf)"
+    echo
+    echo "This removes downloaded RPM package files."
+    echo "Installed packages are NOT removed."
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+    dnf clean packages
+
+    echo
+    echo -e "${GREEN}[CLEANED]${RESET} DNF package cache."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 2 - UNUSED DEPENDENCIES
+# ============================================================
+
+unused_dependencies() {
+
+    header
+
+    echo
+    echo -e "${BOLD}2 - UNUSED DEPENDENCIES${RESET}"
+    echo
+    echo "DNF will locate automatically installed packages"
+    echo "that are no longer required."
+    echo
+    echo "DNF will display its proposed changes."
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+    dnf autoremove
+
+    pause_menu
+}
+
+
+# ============================================================
+# 3 - DNF METADATA
+# ============================================================
+
+dnf_metadata() {
+
+    header
+
+    echo
+    echo -e "${BOLD}3 - DNF REPOSITORY METADATA / CACHE${RESET}"
+    echo
+    echo "Current DNF cache:"
+    echo "  $(directory_size /var/cache/dnf)"
+    echo
+    echo "Repository metadata will be downloaded again"
+    echo "when DNF next requires it."
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+
+    dnf clean all
+    rm -rf -- /var/cache/dnf/* 2>/dev/null || true
+
+    echo
+    echo -e "${GREEN}[CLEANED]${RESET} DNF metadata/cache."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 4 - CRASH REPORTS
+# ============================================================
+
+crash_reports() {
+
+    header
+
+    echo
+    echo -e "${BOLD}4 - CRASH REPORTS / COREDUMPS${RESET}"
+    echo
+    echo "Stored crash reports and coredumps are useful"
+    echo "mainly for debugging."
+
+    if command -v coredumpctl >/dev/null 2>&1; then
+        echo
+        echo "Current coredump storage:"
+        coredumpctl info 2>/dev/null |
+            grep -m1 "Storage:" || true
+    fi
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+
+    if command -v coredumpctl >/dev/null 2>&1; then
+        echo "Cleaning systemd coredumps..."
+        coredumpctl purge 2>/dev/null || true
+    fi
+
+    if [[ -d /var/spool/abrt ]]; then
+        echo "Cleaning ABRT reports..."
+        rm -rf -- /var/spool/abrt/* 2>/dev/null || true
+    fi
+
+    echo
+    echo -e "${GREEN}[CLEANED]${RESET} Crash reports."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 5 - ROTATED LOGS
+# ============================================================
+
+old_logs() {
+
+    header
+
+    echo
+    echo -e "${BOLD}5 - ROTATED / COMPRESSED LOGS${RESET}"
+    echo
+    echo "Current /var/log size:"
+    echo "  $(directory_size /var/log)"
+    echo
+    echo "Active log files will NOT be truncated."
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+    echo "Removing rotated/compressed logs..."
+
+    find /var/log -xdev -type f \
+        \( \
+            -name "*.gz" \
+            -o -name "*.old" \
+            -o -name "*.log.*" \
+            -o -regex '.*\.[0-9]+$' \
+        \) \
+        -delete 2>/dev/null || true
+
+    echo
+    echo -e "${GREEN}[CLEANED]${RESET} Old logs."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 6 - JOURNAL
+# ============================================================
+
+journal_cleanup() {
+
+    header
+
+    echo
+    echo -e "${BOLD}6 - SYSTEMD JOURNAL${RESET}"
+    echo
+
+    journalctl --disk-usage 2>/dev/null || true
+
+    echo
+    echo "Journal entries from the most recent 3 days"
+    echo "will be retained."
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+    journalctl --rotate
+    journalctl --vacuum-time=3d
+
+    echo
+    echo -e "${GREEN}[CLEANED]${RESET} systemd journal."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 7 - TEMPORARY FILES
+# ============================================================
+
+temporary_files() {
+
+    header
+
+    echo
+    echo -e "${BOLD}7 - TEMPORARY FILES${RESET}"
+    echo
+    echo "/tmp size:"
+    echo "  $(directory_size /tmp)"
+    echo
+    echo "/var/tmp size:"
+    echo "  $(directory_size /var/tmp)"
+    echo
+    echo "The cleanup will:"
+    echo "  * Run systemd-tmpfiles --clean"
+    echo "  * Remove /tmp files older than 3 days"
+    echo "  * Remove /var/tmp files older than 7 days"
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+
+    systemd-tmpfiles --clean
+
+    find /tmp -xdev -mindepth 1 -mtime +3 \
+        -delete 2>/dev/null || true
+
+    find /var/tmp -xdev -mindepth 1 -mtime +7 \
+        -delete 2>/dev/null || true
+
+    echo
+    echo -e "${GREEN}[CLEANED]${RESET} Temporary files."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 8 - APPLICATION CACHE
+# ============================================================
+
+application_cache() {
+
+    header
+
+    echo
+    echo -e "${BOLD}8 - USER APPLICATION CACHES${RESET}"
+    echo
+    echo -e "${YELLOW}WARNING:${RESET}"
+    echo
+    echo "This clears ~/.cache for users under /home."
+    echo
+    echo "KDE, browser, thumbnail, Steam and other application"
+    echo "caches can be removed."
+    echo
+    echo "Applications will recreate required cache files."
+
+    echo
+    echo "Current user cache sizes:"
+    echo
+
+    for home in /home/*; do
+
+        [[ -d "$home/.cache" ]] || continue
+
+        printf "  %-35s %s\n" \
+            "$home/.cache" \
+            "$(directory_size "$home/.cache")"
+
+    done
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+
+    for home in /home/*; do
+
+        [[ -d "$home/.cache" ]] || continue
+
+        echo "Cleaning $home/.cache"
+
+        find "$home/.cache" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} + \
+            2>/dev/null || true
+
+    done
+
+    echo
+    echo -e "${GREEN}[CLEANED]${RESET} User caches."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 9 - CLEAN ALL
+# ============================================================
+
+clean_all() {
+
+    header
+
+    echo
+    echo -e "${YELLOW}${BOLD}9 - CLEAN ALL${RESET}"
+    echo
+    echo "This runs cleanup operations 1 through 8:"
+    echo
+    echo "  1 - DNF package cache"
+    echo "  2 - Unused dependencies"
+    echo "  3 - DNF repository metadata/cache"
+    echo "  4 - Crash reports/coredumps"
+    echo "  5 - Rotated/compressed logs"
+    echo "  6 - systemd journal older than 3 days"
+    echo "  7 - Temporary files"
+    echo "  8 - User application caches"
+    echo
+    echo "Personal documents are NOT targeted."
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+    echo "[1/8] DNF package cache"
+    dnf clean packages
+
+    echo
+    echo "[2/8] Unused dependencies"
+    dnf autoremove -y
+
+    echo
+    echo "[3/8] DNF metadata/cache"
+    dnf clean all
+    rm -rf -- /var/cache/dnf/* 2>/dev/null || true
+
+    echo
+    echo "[4/8] Crash reports"
+
+    if command -v coredumpctl >/dev/null 2>&1; then
+        coredumpctl purge 2>/dev/null || true
+    fi
+
+    if [[ -d /var/spool/abrt ]]; then
+        rm -rf -- /var/spool/abrt/* 2>/dev/null || true
+    fi
+
+    echo
+    echo "[5/8] Rotated/compressed logs"
+
+    find /var/log -xdev -type f \
+        \( \
+            -name "*.gz" \
+            -o -name "*.old" \
+            -o -name "*.log.*" \
+            -o -regex '.*\.[0-9]+$' \
+        \) \
+        -delete 2>/dev/null || true
+
+    echo
+    echo "[6/8] systemd journal"
+
+    journalctl --rotate
+    journalctl --vacuum-time=3d
+
+    echo
+    echo "[7/8] Temporary files"
+
+    systemd-tmpfiles --clean
+
+    find /tmp -xdev -mindepth 1 -mtime +3 \
+        -delete 2>/dev/null || true
+
+    find /var/tmp -xdev -mindepth 1 -mtime +7 \
+        -delete 2>/dev/null || true
+
+    echo
+    echo "[8/8] User application caches"
+
+    for home in /home/*; do
+
+        [[ -d "$home/.cache" ]] || continue
+
+        echo "Cleaning $home/.cache"
+
+        find "$home/.cache" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -exec rm -rf -- {} + \
+            2>/dev/null || true
+
+    done
+
+    echo
+    echo -e "${GREEN}${BOLD}FULL CLEANUP COMPLETED.${RESET}"
+
+    pause_menu
+}
+
+
+# ============================================================
+# 10 - DISK USAGE ANALYZER
+# ============================================================
+
+disk_analyzer() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}10 - DISK USAGE ANALYZER${RESET}"
+    echo
+    echo "READ-ONLY operation."
+    echo
+    echo "This shows where disk space is currently being used."
+    echo
+    echo "ROOT FILESYSTEM"
+    echo "------------------------------------------------------------"
+
+    df -hT /
+
+    echo
+    echo "IMPORTANT DIRECTORIES"
+    echo "------------------------------------------------------------"
+
+    for dir in \
+        /var/cache \
+        /var/log \
+        /var/tmp \
+        /tmp \
+        /var/lib/flatpak \
+        /home
+    do
+
+        [[ -e "$dir" ]] || continue
+
+        printf "%-25s %s\n" \
+            "$dir" \
+            "$(directory_size "$dir")"
+
+    done
+
+    echo
+    echo "SYSTEMD JOURNAL"
+    echo "------------------------------------------------------------"
+
+    journalctl --disk-usage 2>/dev/null || true
+
+    echo
+    echo "LARGEST ROOT DIRECTORIES"
+    echo "------------------------------------------------------------"
+    echo
+
+    du -x -h --max-depth=1 / 2>/dev/null |
+        sort -hr |
+        head -n 15
+
+    echo
+    echo "Analysis completed."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 11 - FIND LARGEST FILES
+# ============================================================
+
+largest_files() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}11 - FIND LARGEST FILES${RESET}"
+    echo
+    echo "READ-ONLY operation."
+    echo
+    echo "Searching the root filesystem for files larger"
+    echo "than 500 MiB."
+    echo
+    echo "The 20 largest matches will be displayed."
+    echo
+    echo "This can take some time..."
+    echo
+
+    find / -xdev -type f -size +500M \
+        -printf '%s\t%p\n' 2>/dev/null |
+        sort -nr |
+        head -n 20 |
+        while IFS=$'\t' read -r size file; do
+
+            printf "%10s  %s\n" \
+                "$(human "$size")" \
+                "$file"
+
+        done
+
+    echo
+    echo "Search completed."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 12 - FLATPAK MAINTENANCE
+# ============================================================
+
+flatpak_maintenance() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}12 - FLATPAK MAINTENANCE${RESET}"
+    echo
+
+    if ! command -v flatpak >/dev/null 2>&1; then
+
+        echo "Flatpak is not installed on this system."
+
+        pause_menu
+        return
+
+    fi
+
+    echo "System Flatpak storage:"
+    echo "  $(directory_size /var/lib/flatpak)"
+
+    echo
+    echo "Installed Flatpak applications:"
+    echo "------------------------------------------------------------"
+
+    flatpak list --app \
+        --columns=application,name 2>/dev/null || true
+
+    echo
+    echo "Unused runtimes can be safely removed when no installed"
+    echo "Flatpak application requires them."
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+    flatpak uninstall --unused
+
+    pause_menu
+}
+
+
+# ============================================================
+# 13 - KERNEL CHECK
+# ============================================================
+
+kernel_check() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}13 - KERNEL CHECK${RESET}"
+    echo
+    echo "READ-ONLY operation."
+    echo
+    echo "RUNNING KERNEL"
+    echo "------------------------------------------------------------"
+    echo
+    echo "  $(uname -r)"
+
+    echo
+    echo "INSTALLED KERNELS"
+    echo "------------------------------------------------------------"
+    echo
+
+    rpm -q kernel-core 2>/dev/null |
+        sort -V || true
+
+    echo
+    echo "Kernel packages are NOT automatically removed."
+    echo
+    echo "Keeping fallback kernels is useful if a new kernel"
+    echo "causes boot, NVIDIA or hardware problems."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 14 - DNF / RPM HEALTH CHECK
+# ============================================================
+
+dnf_health() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}14 - DNF / RPM HEALTH CHECK${RESET}"
+    echo
+    echo "This performs diagnostic package checks."
+    echo
+
+    echo "RPM DATABASE"
+    echo "------------------------------------------------------------"
+
+    if rpm --verifydb; then
+        echo
+        echo -e "${GREEN}[OK]${RESET} RPM database verification passed."
+    else
+        echo
+        echo -e "${RED}[ERROR]${RESET} RPM database reported problems."
+    fi
+
+    echo
+    echo "PACKAGE DEPENDENCIES"
+    echo "------------------------------------------------------------"
+    echo
+
+    dnf check || true
+
+    echo
+    echo "DUPLICATE PACKAGES"
+    echo "------------------------------------------------------------"
+    echo
+
+    if dnf repoquery --duplicates >/tmp/vanko-duplicates.$$ 2>/dev/null; then
+
+        if [[ -s /tmp/vanko-duplicates.$$ ]]; then
+            cat /tmp/vanko-duplicates.$$
+        else
+            echo "No duplicate packages detected."
+        fi
+
+    else
+        echo "Duplicate-package query unavailable."
+    fi
+
+    rm -f /tmp/vanko-duplicates.$$
+
+    pause_menu
+}
+
+
+# ============================================================
+# 15 - FAILED SYSTEMD SERVICES
+# ============================================================
+
+failed_services() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}15 - FAILED SYSTEMD SERVICES${RESET}"
+    echo
+    echo "READ-ONLY operation."
+    echo
+    echo "The following systemd units are currently failed:"
+    echo
+    echo "------------------------------------------------------------"
+    echo
+
+    systemctl --failed --no-pager
+
+    pause_menu
+}
+
+
+# ============================================================
+# 16 - CURRENT BOOT ERRORS
+# ============================================================
+
+boot_errors() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}16 - CURRENT BOOT ERROR LOG${RESET}"
+    echo
+    echo "READ-ONLY operation."
+    echo
+    echo "Showing ERROR priority and higher from the"
+    echo "current boot."
+    echo
+    echo "------------------------------------------------------------"
+    echo
+
+    journalctl \
+        -b \
+        -p err \
+        --no-pager || true
+
+    pause_menu
+}
+
+
+# ============================================================
+# 17 - SSD / NVMe TRIM
+# ============================================================
+
+trim_maintenance() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}17 - SSD / NVMe TRIM${RESET}"
+    echo
+
+    echo "FSTRIM TIMER"
+    echo "------------------------------------------------------------"
+    echo
+
+    if systemctl is-enabled fstrim.timer >/dev/null 2>&1; then
+
+        echo -e "fstrim.timer: ${GREEN}ENABLED${RESET}"
+
+    else
+
+        echo -e "fstrim.timer: ${YELLOW}NOT ENABLED${RESET}"
+
+    fi
+
+    echo
+    systemctl status fstrim.timer \
+        --no-pager \
+        --lines=5 2>/dev/null || true
+
+    echo
+    echo "DEVICE DISCARD INFORMATION"
+    echo "------------------------------------------------------------"
+    echo
+
+    lsblk -D
+
+    echo
+    echo "Fedora normally performs periodic TRIM using"
+    echo "fstrim.timer."
+    echo
+    echo "You can optionally run manual TRIM now."
+
+    confirm || {
+        pause_menu
+        return
+    }
+
+    echo
+    fstrim -av
+
+    pause_menu
+}
+
+
+# ============================================================
+# 18 - BTRFS INFORMATION / HEALTH
+# ============================================================
+
+btrfs_info() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}18 - BTRFS USAGE / HEALTH${RESET}"
+    echo
+    echo "READ-ONLY operation."
+    echo
+
+    if ! command -v btrfs >/dev/null 2>&1; then
+
+        echo "The btrfs command is not installed."
+
+        pause_menu
+        return
+
+    fi
+
+    ROOT_FS=$(findmnt -n -o FSTYPE /)
+
+    echo "Root filesystem type: $ROOT_FS"
+    echo
+
+    if [[ "$ROOT_FS" != "btrfs" ]]; then
+
+        echo "The root filesystem is not Btrfs."
+        echo "No Btrfs analysis is required."
+
+        pause_menu
+        return
+
+    fi
+
+    echo "FILESYSTEM USAGE"
+    echo "------------------------------------------------------------"
+    echo
+
+    btrfs filesystem usage /
+
+    echo
+    echo "DEVICE STATISTICS"
+    echo "------------------------------------------------------------"
+    echo
+
+    btrfs device stats /
+
+    echo
+    echo "FILESYSTEM DEVICE INFORMATION"
+    echo "------------------------------------------------------------"
+    echo
+
+    btrfs filesystem show /
+
+    echo
+    echo "No Btrfs data, subvolumes or snapshots were modified."
+
+    pause_menu
+}
+
+
+# ============================================================
+# 19 - SYSTEM INFORMATION
+# ============================================================
+
+system_info() {
+
+    header
+
+    echo
+    echo -e "${CYAN}${BOLD}19 - SYSTEM INFORMATION${RESET}"
+    echo
+    echo "READ-ONLY operation."
+    echo
+
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        echo "OS           : ${PRETTY_NAME:-Unknown}"
+    fi
+
+    echo "Kernel       : $(uname -r)"
+    echo "Architecture : $(uname -m)"
+    echo "Hostname     : $(hostname)"
+    echo "Root FS      : $(findmnt -n -o FSTYPE /)"
+    echo "Uptime       : $(uptime -p)"
+
+    echo
+    echo "ROOT FILESYSTEM"
+    echo "------------------------------------------------------------"
+    echo
+
+    df -hT /
+
+    echo
+    echo "MEMORY"
+    echo "------------------------------------------------------------"
+    echo
+
+    free -h
+
+    echo
+    echo "CPU"
+    echo "------------------------------------------------------------"
+    echo
+
+    lscpu |
+        grep -E \
+        'Model name|Socket|Core|Thread|CPU\(s\):' |
+        head -n 10
+
+    echo
+    echo "BLOCK DEVICES"
+    echo "------------------------------------------------------------"
+    echo
+
+    lsblk \
+        -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+
+    pause_menu
+}
+
+
+# ============================================================
+# WELCOME
+# ============================================================
+
+header
+
+echo
+echo "Welcome to Fedora Maintenance Utility."
+echo
+echo "This utility combines system cleanup, disk analysis,"
+echo "package diagnostics and basic Fedora health checks."
+echo
+echo "Cleanup operations require confirmation."
+echo
+echo "Diagnostic operations are read-only."
+echo
+echo "Personal documents are NOT intentionally modified."
+echo
+echo "Menu options 1-9 perform cleanup operations."
+echo "Menu options 10-19 provide analysis and maintenance."
+echo
+echo "============================================================"
+echo
+
+read -rp "Press ENTER to continue..."
+
+
+# ============================================================
+# MAIN MENU
+# ============================================================
+
+while true; do
+
+    header
+
+    echo
+    echo -e "${BOLD}CLEANUP${RESET}"
+    echo "------------------------------------------------------------"
+    echo
+    echo "  1 - DNF package cache"
+    echo "  2 - Unused dependencies"
+    echo "  3 - DNF repository metadata/cache"
+    echo "  4 - Crash reports and old coredumps"
+    echo "  5 - Rotated/compressed logs"
+    echo "  6 - systemd journal logs older than 3 days"
+    echo "  7 - Temporary files"
+    echo "  8 - User application caches"
+    echo
+    echo -e "  9 - ${YELLOW}${BOLD}CLEAN ALL${RESET}"
+
+    echo
+    echo -e "${BOLD}ANALYSIS & MAINTENANCE${RESET}"
+    echo "------------------------------------------------------------"
+    echo
+    echo " 10 - Disk usage analyzer"
+    echo " 11 - Find 20 largest files"
+    echo " 12 - Flatpak maintenance"
+    echo " 13 - Kernel check"
+    echo " 14 - DNF / RPM health check"
+    echo " 15 - Failed systemd services"
+    echo " 16 - Current boot error log"
+    echo " 17 - SSD / NVMe TRIM"
+    echo " 18 - Btrfs usage / health"
+    echo " 19 - System information"
+
+    echo
+    echo "  0 - Finish / Exit"
+    echo
+    echo "============================================================"
+    echo "                    Script by Vanko"
+    echo "============================================================"
+    echo
+
+    read -rp "Select option [0-19]: " choice
+
+    case "$choice" in
+
+        1)
+            dnf_packages
+            ;;
+
+        2)
+            unused_dependencies
+            ;;
+
+        3)
+            dnf_metadata
+            ;;
+
+        4)
+            crash_reports
+            ;;
+
+        5)
+            old_logs
+            ;;
+
+        6)
+            journal_cleanup
+            ;;
+
+        7)
+            temporary_files
+            ;;
+
+        8)
+            application_cache
+            ;;
+
+        9)
+            clean_all
+            ;;
+
+        10)
+            disk_analyzer
+            ;;
+
+        11)
+            largest_files
+            ;;
+
+        12)
+            flatpak_maintenance
+            ;;
+
+        13)
+            kernel_check
+            ;;
+
+        14)
+            dnf_health
+            ;;
+
+        15)
+            failed_services
+            ;;
+
+        16)
+            boot_errors
+            ;;
+
+        17)
+            trim_maintenance
+            ;;
+
+        18)
+            btrfs_info
+            ;;
+
+        19)
+            system_info
+            ;;
+
+        0)
+
+            header
+
+            echo
+            echo "Session finished."
+            echo
+            echo "No further changes will be made."
+            echo
+            echo "Thank you for using Fedora Maintenance Utility."
+            echo
+            echo "                    Script by Vanko"
+            echo
+            echo "============================================================"
+            echo
+
+            read -rp "Press ENTER to exit..."
+            exit 0
+            ;;
+
+        *)
+
+            echo
+            echo -e "${RED}Invalid selection.${RESET}"
+            echo "Please enter a number from 0 to 19."
+            ;;
+
+    esac
+
+done
